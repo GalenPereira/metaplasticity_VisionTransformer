@@ -4,7 +4,7 @@ import matplotlib
 matplotlib.use('agg')
 import argparse
 #assert(torch.__version__ <= '1.1.0')
-from models_utils import *
+from model_utils import *
 from data_utils import *
 from datetime import datetime
 from VisionTransformer import *
@@ -58,20 +58,16 @@ if not(os.path.exists(path)):
 
 createHyperparametersFile(path, args)
 
-train_loader_list = []
-test_loader_list = []
-dset_train_list = []
-task_names = []
-print(args.net)
+
 #
 # Define transformation that resizes images to 80x80 for both CIFAR100 and Tiny ImageNet
 transform = transforms.Compose([
-    transforms.Resize((80, 80)),  # Resize to 80x80
+    transforms.Resize((224, 224)),  # Resize to 80x80
     transforms.ToTensor(),  # Convert image to tensor
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalizing with mean and std for three channels
 ])
 
-for idx, task in enumerate(args.task_sequence):
+'''for idx, task in enumerate(args.task_sequence):
     task = task.lower().strip()
     if '-' in task:
         task_name, n_subset_str = task.split('-')
@@ -83,16 +79,17 @@ for idx, task in enumerate(args.task_sequence):
             test_loader_list.append(test_loader)
             task_names.extend(['cifar100-'+str(i+1) for i in range(n_subset)])
         elif 'imgnet' in task_name:
-            train_loader,test_loader = create_tiny_imgnet_loaders(root_dir='tiny-imagenet-200', num_tasks=n_subset,batch_size=20, transform=transform)
+            train_loader,test_loader = create_tiny_imgnet_loaders(root_dir='tiny-imagenet-200', num_subsets=n_subset,batch_size=20, transform=transform)
             train_loader_list.append(train_loader)
             test_loader_list.append(test_loader)
             dset_train_list.append(test_loader)
             task_names.append(task)
+'''
+train_loader_list,test_loader_list, task_names= create_tiny_imgnet_loaders(root_dir='tiny-imagenet-200', num_subsets=5,batch_size=20, transform=transform)
+# Checking the sizes of the created loaders
+for i, (train_loader, test_loader) in enumerate(zip(train_loader_list, test_loader_list)):
+    print(f"Subset {i + 1} - Train loader size: {len(train_loader.dataset)}, Test loader size: {len(test_loader.dataset)}")
 
-# After the loop, print dataset shapes for verification
-for dataset in dset_train_list:
-    print(f"Dataset size: {len(dataset)}")
-      
 # Hyperparameters
 lr = args.lr
 epochs = args.epochs_per_task
@@ -104,12 +101,12 @@ archi = [args.in_size] + args.hidden_layers + [args.out_size]
 
 if args.net=='vit':
 	custom_config = {
-    	"img_size": 80,
+    	"img_size": 224,
     	"patch_size": 16,
     	"in_chans": 3,
-    	"n_classes":10,
+    	"n_classes":200,
     	"embed_dim": 768,
-    	"depth": 12,
+    	"depth": 2,
     	"n_heads": 12,
     	"mlp_ratio": 4.,
     	"qkv_bias": True,
@@ -117,24 +114,19 @@ if args.net=='vit':
 	model = VisionTransformer(**custom_config).to(args.device)
 elif args.net=='bvit':
 	custom_config = {
-    	"img_size": 80,
+    	"img_size": 224,
     	"patch_size": 16,
     	"in_chans": 3,
-    	"n_classes":10,
+    	"n_classes":200,
     	"embed_dim": 768,
-    	"depth": 12,
+    	"depth": 2,
     	"n_heads": 12,
     	"mlp_ratio": 4.,
     	"qkv_bias": True,
 	}
 	model = BinarizeVisionTransformer(**custom_config).to(args.device)
-elif args.net =='bnn':
-    model = BNN( archi, init = args.init, width = args.init_width, norm = args.norm).to(device)
-elif args.net =='dnn':
-    model = DNN( archi, init = args.init, width = args.init_width).to(device)
-elif args.net=='bcnn':
-    model = ConvBNN(init = args.init, width = args.init_width, norm=args.norm).to(device)
-meta = {}
+      
+meta={}
 if args.net=='vit' or args.net=='bvit':
         for n, p in model.named_parameters():
             index = [768,10]
@@ -152,14 +144,5 @@ else:
 #Model Details
 print("Model Parameters",sum(p.numel() for p in model.parameters()))
 print(model)
-#plot_parameters(model, path, save=save_result)
-'''
-print("Len of trai loader",len(train_loader_list))
-
-data_iter = iter(train_loader)
-images, labels = next(data_iter)
-print('Shape of images:', images.shape,labels.shape)
-'''
-for i in train_loader_list:
-    train_accuracy= run_training_loop(model, i, test_loader_list, args, args.epochs_per_task, task_names)
-#print(train_accuracy,test_accuracy)
+data = run_training_loop(model, train_loader_list, test_loader_list, args, args.epochs_per_task, task_names)
+print(data)
