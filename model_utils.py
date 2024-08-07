@@ -387,7 +387,7 @@ class Adam_meta(torch.optim.Optimizer):
                 if p.dim()==1: # True if p is bias, false if p is weight
                     p.data.addcdiv_(-step_size, exp_avg, denom)
                 else:
-                    decayed_exp_avg = torch.mul(torch.ones_like(p.data)-torch.pow(torch.tanh(group['meta'][p.newname]*torch.abs(p.data)),2), exp_avg)
+                    decayed_exp_avg = torch.mul(torch.ones_like(p.data)-torch.pow(torch.tanh(0.0*torch.abs(p.data)),2), exp_avg)
                     #p.data.addcdiv_(-step_size, exp_avg , denom)  #normal update
                     p.data.addcdiv_(-step_size, torch.where(condition_consolidation, decayed_exp_avg, exp_avg), denom)  #assymetric lr for metaplasticity
                     
@@ -612,49 +612,9 @@ def train(model, train_loader, current_task_index,num_epochs, optimizer, vit, ar
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch {num_epochs-1}, Loss: {avg_loss:.4f}")
 
-    
-def test(model, test_loader, device,args, criterion = torch.nn.CrossEntropyLoss(reduction='sum'), verbose = False):
-    
-    model.eval()
-    test_loss = 0
-    correct = 0
-    if not(args.net=='vit'):
-        for data, target in test_loader:
-            if torch.cuda.is_available():
-                data, target = data.to(device), target.to(device)
-            output = model(data).to(device)
-            test_loss += criterion(output, target).item() # mean batch loss
-            pred = output.data.max(1, keepdim=True)[1] # get the index of the max log-probability
-            correct += pred.eq(target.data.view_as(pred)).cpu().sum()
+ 
 
-        test_loss /= len(test_loader.dataset)
-        test_acc = round( 100. * float(correct) / len(test_loader.dataset)  , 2)
-        
-        if verbose :
-            print('Test accuracy: {}/{} ({:.2f}%)'.format(
-                correct, len(test_loader.dataset),
-                test_acc))
-    else:
-    
-        for data, target in test_loader:
-            #data = data.repeat(1, 3, 1, 1) #uncoment for mnist
-            if torch.cuda.is_available():
-                data, target = data.to(device), target.to(device)
-            output = model(data).to(device)
-            test_loss += criterion(output, target).item() # mean batch loss
-            pred = output.data.max(1, keepdim=True)[1] # get the index of the max log-probability
-            correct += pred.eq(target.data.view_as(pred)).cpu().sum()
-
-        test_loss /= len(test_loader.dataset)
-        test_acc = round( 100. * float(correct) / len(test_loader.dataset)  , 2)
-        
-        if verbose :
-            print('Test accuracy: {}/{} ({:.2f}%)'.format(
-                correct, len(test_loader.dataset),
-                test_acc))
-    return test_acc, test_loss
-
-
+ 
 def estimate_fisher(model, dataset, device, num = 1000, empirical = True):
     # Estimate the FI-matrix for num batches of size 1
     
@@ -883,10 +843,55 @@ def switch_sign_induced_loss_increase(model, loader, bins = 10, sample = 100, la
 
     return hidden_value_cat_loss_increase
 
+def plot_task_accuracies(task_accuracies, task_names, save_path="task_accuracies.png"):
+    plt.figure(figsize=(10, 5))
+    for task_name in task_names:
+        epochs = range(1, len(task_accuracies[task_name]) + 1)
+        plt.plot(epochs, task_accuracies[task_name], marker='o', label=f'Test Acc on {task_name}')
 
+    plt.title('Test Accuracy on Previous Tasks Over Epochs')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(save_path)  # Save the plot to a file
+    plt.close()  # Close the plot to free up memory
 
+def plot_parameters(model, path, save=True):
+    num_layers = sum(1 for n, p in model.named_parameters() if (p.requires_grad and n.find('bias') == -1 and len(p.size()) != 1))
+    cols = 2
+    rows = (num_layers + cols - 1) // cols
 
-def run_training_loop(model, train_loader_list, test_loader_list, args, epochs, task_names):
+    fig, axes = plt.subplots(rows, cols, figsize=(15, 10))
+
+    i = 0
+    for (n, p), ax in zip(model.named_parameters(), axes.flat):
+        if (p.requires_grad and n.find('bias') == -1 and len(p.size()) != 1):
+            if model.__class__.__name__.find('B') != -1:  # BVGG -> plot p.org
+                if hasattr(p, 'org'):
+                    weights = p.org.data.cpu().numpy()
+                else:
+                    weights = p.data.cpu().numpy()
+                bins = 100
+            else:
+                weights = p.data.cpu().numpy()  # TVGG or FVGG plot p
+                bins = 50
+
+            ax.hist(weights.flatten(), bins)
+            ax.set_title(n.replace('.', '_'))
+            i += 1
+
+    # Hide any empty subplots
+    for ax in axes.flat[i:]:
+        ax.axis('off')
+
+    if save:
+        time = datetime.now().strftime('%H-%M-%S')
+        os.makedirs(path, exist_ok=True)  # Ensure the directory exists
+        fig.savefig(os.path.join(path, time + '_weight_distribution.png'))
+    plt.close()
+
+def run_training_loop(model, train_loader_list, test_loader_list, args, epochs, task_names, plot_path="plots"):
     data = {
         'task_order': [],
         'epoch': [],
@@ -900,20 +905,25 @@ def run_training_loop(model, train_loader_list, test_loader_list, args, epochs, 
     }
 
     meta = {}
-    ewc_lambda = args.ewc_lambda  # Assuming this is set in args
+    ewc_lambda = args.ewc_lambda
     si_lambda = args.si_lambda
 
+    num_tasks = len(train_loader_list)
+
+    if not os.path.exists(plot_path):
+        os.makedirs(plot_path)
+
     for task_idx, train_loader in enumerate(train_loader_list):
-        if not(args.beaker or args.si):
-            optimizer = Adam_meta(model.parameters(), lr=args.lr, meta=meta, weight_decay=args.decay)
+        if not (args.beaker or args.si):
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.decay)
 
         for epoch in range(1, epochs + 1):
             if args.ewc:
                 train_accuracy, train_loss = train2(model, train_loader, task_idx, epochs, optimizer, args.device, args,
-                                                   prev_cons=previous_tasks_fisher, prev_params=previous_tasks_parameters)
+                                                    prev_cons=previous_tasks_fisher, prev_params=previous_tasks_parameters)
             elif args.si:
                 train_accuracy, train_loss = train2(model, train_loader, task_idx, epochs, optimizer, args.device, args,
-                                                   prev_cons=omega, path_integ=W, prev_params=(p_prev, p_old))
+                                                    prev_cons=omega, path_integ=W, prev_params=(p_prev, p_old))
             else:
                 train_accuracy, train_loss = train2(model, train_loader, task_idx, epochs, optimizer, args.device, args)
 
@@ -926,16 +936,23 @@ def run_training_loop(model, train_loader_list, test_loader_list, args, epochs, 
             data['ewc'].append(ewc_lambda)
             data['SI'].append(si_lambda)
 
-            # Test the model on all tasks seen so far after training
             current_bn_state = model.save_bn_states()
-            for other_task_idx, test_loader in enumerate(test_loader_list[:task_idx + 1]):
-                test_accuracy, test_loss = test(model, test_loader, args.device, args, verbose=True)
-                data['task_accuracy'][task_names[other_task_idx]].append(test_accuracy)
 
-                model.load_bn_states(current_bn_state)
+            # Test the model on the opposite task
+            opposite_task_idx = num_tasks - task_idx - 1
+            test_loader = test_loader_list[opposite_task_idx]
+            test_accuracy, test_loss = test(model, test_loader, args.device, args, verbose=True)
+            data['task_accuracy'][task_names[opposite_task_idx]].append(test_accuracy)
 
-        # Plotting task-specific accuracies
-        plot_task_accuracies(data['task_accuracy'], task_names)
+            model.load_bn_states(current_bn_state)
+
+            # Plot weight distribution and save the plot
+            #plot_weight_path = os.path.join(plot_path, f"weight_distribution_task_{task_idx + 1}_epoch_{epoch}.png")
+            #plot_parameters(model, plot_weight_path, save=True)
+
+        # Save the task accuracy plot after each task
+        plot_save_path = os.path.join(plot_path, f"task_accuracies_task_{task_idx + 1}.png")
+        plot_task_accuracies(data['task_accuracy'], task_names, save_path=plot_save_path)
 
     return data
 
@@ -944,10 +961,9 @@ def train2(model, train_loader, task_idx, num_epochs, optimizer, device, args, p
     total_loss = 0
     correct = 0
     for data, target in train_loader:
-        print("Shapeeee==",data.shape,target.shape)
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
-        
+
         output = model(data)
         loss = torch.nn.CrossEntropyLoss()(output, target)
         loss.backward()
@@ -958,18 +974,31 @@ def train2(model, train_loader, task_idx, num_epochs, optimizer, device, args, p
 
     total_samples = len(train_loader.dataset)
     train_accuracy = 100 * correct / total_samples
-    print(train_accuracy, total_loss / total_samples)
+    avg_loss = total_loss / total_samples
+    print(f"Train Accuracy = {train_accuracy:.2f}, Loss = {avg_loss:.6f}")
 
-def plot_task_accuracies(task_accuracies, task_names):
-    plt.figure(figsize=(10, 5))
-    for task_name in task_names:
-        epochs = range(1, len(task_accuracies[task_name]) + 1)
-        plt.plot(epochs, task_accuracies[task_name], marker='o', label=f'Test Acc on {task_name}')
+    return train_accuracy, avg_loss
 
-    plt.title('Test Accuracy on Previous Tasks Over Epochs')
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy (%)')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+def test(model, test_loader, device, args, criterion=None, verbose=False):
+    if criterion is None:
+        criterion = torch.nn.CrossEntropyLoss(reduction='sum')
+
+    model.eval()
+    test_loss = 0
+    correct = 0
+
+    for data, target in test_loader:
+        data, target = data.to(device), target.to(device)
+        output = model(data)
+        test_loss += criterion(output, target).item()
+        pred = output.data.max(1, keepdim=True)[1]
+        correct += pred.eq(target.data.view_as(pred)).cpu().sum()
+
+    avg_loss = test_loss / len(test_loader.dataset)
+    test_acc = 100. * correct / len(test_loader.dataset)
+
+    if verbose:
+        print(f'Test accuracy: {correct}/{len(test_loader.dataset)} ({test_acc:.2f}%)')
+
+    return test_acc, avg_loss
 
