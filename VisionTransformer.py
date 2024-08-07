@@ -496,75 +496,19 @@ class BinarizeBlock(nn.Module):
         return x
 
 class VisionTransformer(nn.Module):
-    """Simplified implementation of the Vision transformer.
-
-	Parameters
-	----------
-	img_size : int
-    	Both height and the width of the image (it is a square).
-
-	patch_size : int
-    	Both height and the width of the patch (it is a square).
-
-	in_chans : int
-    	Number of input channels.
-
-	n_classes : int
-    	Number of classes.
-
-	embed_dim : int
-    	Dimensionality of the token/patch embeddings.
-
-	depth : int
-    	Number of blocks.
-
-	n_heads : int
-    	Number of attention heads.
-
-	mlp_ratio : float
-    	Determines the hidden dimension of the `MLP` module.
-
-	qkv_bias : bool
-    	If True then we include bias to the query, key and value projections.
-
-	p, attn_p : float
-    	Dropout probability.
-
-	Attributes
-	----------
-	patch_embed : PatchEmbed
-    	Instance of `PatchEmbed` layer.
-
-	cls_token : nn.Parameter
-    	Learnable parameter that will represent the first token in the sequence.
-    	It has `embed_dim` elements.
-
-	pos_emb : nn.Parameter
-    	Positional embedding of the cls token + all the patches.
-    	It has `(n_patches + 1) * embed_dim` elements.
-
-	pos_drop : nn.Dropout
-    	Dropout layer.
-
-	blocks : nn.ModuleList
-    	List of `Block` modules.
-
-	norm : nn.LayerNorm
-    	Layer normalization.
-	"""
-
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, n_classes=200, embed_dim=768, depth=12, n_heads=12, mlp_ratio=4., qkv_bias=True, p=0, atten_p=0.):
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, n_classes=200, embed_dim=768, depth=12, n_heads=12, mlp_ratio=4., qkv_bias=True, p=0., attn_p=0.):
         super().__init__()
         self.embed_dim = embed_dim
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, 1 + self.patch_embed.n_patches, embed_dim))
+        num_patches = self.patch_embed.n_patches
+        self.pos_embed = nn.Parameter(torch.zeros(1, 1 + num_patches, embed_dim))
         self.pos_drop = nn.Dropout(p=p)
 
         layer_list = {}
         for i in range(depth):
-            layer_list[f'block_{i+1}'] = Block(embed_dim, n_heads, mlp_ratio, qkv_bias, p, atten_p)
+            layer_list[f'block_{i+1}'] = Block(embed_dim, n_heads, mlp_ratio, qkv_bias, p, attn_p)
         
         layer_list['norm'] = nn.LayerNorm(embed_dim, eps=1e-6)
         layer_list['head'] = nn.Linear(embed_dim, n_classes)
@@ -574,7 +518,7 @@ class VisionTransformer(nn.Module):
         x = self.patch_embed(x)
         cls_token = self.cls_token.expand(x.size(0), -1, -1)  # Match cls_token to batch size
         x = torch.cat((cls_token, x), dim=1)  # Concatenate cls_token with patch embeddings
-        x = x + self.pos_embed  # Add positional embeddings
+        x = x + self.pos_embed[:, :x.size(1), :]  # Add positional embeddings
         x = self.pos_drop(x)
 
         for i in range(1, len(self.layers) - 2):  # Iterate through blocks
@@ -584,6 +528,7 @@ class VisionTransformer(nn.Module):
         cls_token_final = x[:, 0]
         x = self.layers['head'](cls_token_final)
         return x
+
     def save_bn_states(self):
         bn_states = []
         for name, layer in self.layers.items():
