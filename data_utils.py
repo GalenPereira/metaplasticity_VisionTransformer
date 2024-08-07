@@ -71,12 +71,21 @@ class DatasetProcessing(torch.utils.data.Dataset):
     def __len__(self): 
         return len(self.data)
 
-# Transform to normalize and resize images to 80x80
+'''# Transform to normalize and resize images to 80x80
 transform = transforms.Compose([
     transforms.Resize((80, 80)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])'''
+
+# Define transforms
+transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
+
 
 
 def process_features(X_train, X_test, mode):
@@ -141,40 +150,28 @@ def process_cifar100(root, n_subset, transform):
     return train_loader_list, test_loader_list
 
 
-class TinyImageNetDataset(torch.utils.data.Dataset):
-    def __init__(self, root_dir, split='train', transform=None, class_indices=None):
+class TinyImageNetDataset(Dataset):
+    def __init__(self, root_dir, transform=None, indices=None):
         self.root_dir = root_dir
         self.transform = transform
-        self.split = split
         self.images = []
         self.labels = []
-        self.class_indices = class_indices  # Indices of classes to be included in the task
 
-        # Path to train, val, or test directory
-        data_dir = os.path.join(root_dir, 'train' if split != 'test' else 'val')
-        
         # Load class labels for train and validation.
         with open(os.path.join(root_dir, 'wnids.txt'), 'r') as f:
             self.classes = {cls.strip(): idx for idx, cls in enumerate(f.readlines())}
-        
-        # Filter classes if class_indices is provided
-        if class_indices is not None:
-            self.classes = {cls: idx for cls, idx in self.classes.items() if idx in class_indices}
 
         # Load images and labels
-        if split in ['train', 'val']:
-            for cls, idx in self.classes.items():
-                cls_folder = os.path.join(data_dir, cls, 'images')
-                for img_name in os.listdir(cls_folder):
-                    self.images.append(os.path.join(cls_folder, img_name))
-                    self.labels.append(idx)
-        elif split == 'test':
-            with open(os.path.join(data_dir, 'val_annotations.txt'), 'r') as f:
-                for line in f:
-                    img_name, cls = line.split('\t')[:2]
-                    if cls in self.classes:
-                        self.images.append(os.path.join(data_dir, 'images', img_name))
-                        self.labels.append(self.classes[cls])
+        for cls, idx in self.classes.items():
+            cls_folder = os.path.join(root_dir, 'train', cls, 'images')
+            for img_name in os.listdir(cls_folder):
+                self.images.append(os.path.join(cls_folder, img_name))
+                self.labels.append(idx)
+
+        # Apply subset if indices are provided
+        if indices is not None:
+            self.images = [self.images[i] for i in indices]
+            self.labels = [self.labels[i] for i in indices]
 
     def __len__(self):
         return len(self.images)
@@ -188,28 +185,42 @@ class TinyImageNetDataset(torch.utils.data.Dataset):
             image = self.transform(image)
 
         return image, label
-def create_tiny_imgnet_loaders(root_dir, num_tasks, batch_size, transform):
-    num_classes = 200  # Total number of classes in Tiny ImageNet
-    classes_per_task = num_classes // num_tasks
 
-    train_loaders = []
-    test_loaders = []
+def random_split(indices, lengths):
+    """
+    Randomly split a list of indices into two sets based on the specified lengths.
+    """
+    np.random.shuffle(indices)
+    return indices[:lengths[0]], indices[lengths[0]:]
 
-    for i in range(num_tasks):
-        class_indices = list(range(i * classes_per_task, (i + 1) * classes_per_task))
+# Create the data loaders
+def create_tiny_imgnet_loaders(root_dir, num_subsets, batch_size, transform):
+    full_dataset = TinyImageNetDataset(root_dir, transform=transform)
+    total_images = len(full_dataset)
+    images_per_subset = total_images // num_subsets
 
-        # Train dataset and loader
-        train_dataset = TinyImageNetDataset(root_dir, split='train', transform=transform, class_indices=class_indices)
+    train_loader_list = []
+    test_loader_list = []
+    task_names = []
+
+    for i in range(num_subsets):
+        subset_indices = list(range(i * images_per_subset, (i + 1) * images_per_subset))
+        
+        train_size = int(0.8 * len(subset_indices))
+        test_size = len(subset_indices) - train_size
+        train_indices, test_indices = random_split(subset_indices, [train_size, test_size])
+
+        train_dataset = TinyImageNetDataset(root_dir, transform=transform, indices=train_indices)
+        test_dataset = TinyImageNetDataset(root_dir, transform=transform, indices=test_indices)
+
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-
-        # Test dataset and loader
-        test_dataset = TinyImageNetDataset(root_dir, split='test', transform=transform, class_indices=class_indices)
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
-        train_loaders.append(train_loader)
-        test_loaders.append(test_loader)
+        train_loader_list.append(train_loader)
+        test_loader_list.append(test_loader)
+        task_names.append(f"Task {i+1}")
 
-    return train_loaders, test_loaders
+    return train_loader_list, test_loader_list, task_names
 
 
 def createHyperparametersFile(path, args):
