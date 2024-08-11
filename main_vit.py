@@ -8,6 +8,8 @@ from model_utils import *
 from data_utils import *
 from datetime import datetime
 from VisionTransformer import *
+from datetime import datetime
+from swin_vit import *
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 
@@ -59,32 +61,6 @@ if not(os.path.exists(path)):
 createHyperparametersFile(path, args)
 
 
-#
-# Define transformation that resizes images to 80x80 for both CIFAR100 and Tiny ImageNet
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),  # Resize to 80x80
-    transforms.ToTensor(),  # Convert image to tensor
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalizing with mean and std for three channels
-])
-
-'''for idx, task in enumerate(args.task_sequence):
-    task = task.lower().strip()
-    if '-' in task:
-        task_name, n_subset_str = task.split('-')
-        n_subset = int(n_subset_str)
-
-        if 'cifar100' in task_name:
-            train_loader, test_loader= process_cifar100(root='cifar100',n_subset=n_subset,transform=transform)
-            train_loader_list.append(train_loader)
-            test_loader_list.append(test_loader)
-            task_names.extend(['cifar100-'+str(i+1) for i in range(n_subset)])
-        elif 'imgnet' in task_name:
-            train_loader,test_loader = create_tiny_imgnet_loaders(root_dir='tiny-imagenet-200', num_subsets=n_subset,batch_size=20, transform=transform)
-            train_loader_list.append(train_loader)
-            test_loader_list.append(test_loader)
-            dset_train_list.append(test_loader)
-            task_names.append(task)
-'''
 train_loader_list,test_loader_list, task_names= create_tiny_imgnet_loaders(root_dir='tiny-imagenet-200', num_subsets=5,batch_size=20, transform=transform)
 # Checking the sizes of the created loaders
 for i, (train_loader, test_loader) in enumerate(zip(train_loader_list, test_loader_list)):
@@ -98,51 +74,63 @@ save_result = args.save
 ewc_lambda = args.ewc_lambda
 si_lambda = args.si_lambda
 archi = [args.in_size] + args.hidden_layers + [args.out_size]
+# Assuming all necessary imports are done
 
-if args.net=='vit':
-	custom_config = {
-    	"img_size": 224,
-    	"patch_size": 16,
-    	"in_chans": 3,
-    	"n_classes":200,
-    	"embed_dim": 768,
-    	"depth": 2,
-    	"n_heads": 12,
-    	"mlp_ratio": 4.,
-    	"qkv_bias": True,
-	}
-	model = VisionTransformer(**custom_config).to(args.device)
-elif args.net=='bvit':
-	custom_config = {
-    	"img_size": 224,
-    	"patch_size": 16,
-    	"in_chans": 3,
-    	"n_classes":200,
-    	"embed_dim": 768,
-    	"depth": 2,
-    	"n_heads": 12,
-    	"mlp_ratio": 4.,
-    	"qkv_bias": True,
-	}
-	model = BinarizeVisionTransformer(**custom_config).to(args.device)
-      
-meta={}
-if args.net=='vit' or args.net=='bvit':
-        for n, p in model.named_parameters():
-            index = [768,10]
-            p.newname = 'l'+str(index)
-            if ('fc' in n) or ('cv' in n):
-                meta[p.newname] = args.meta[index-1] if len(args.meta)>1 else args.meta[0]
-                
-else:
+# Define transformations (already provided by you)
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+# Initialize the model based on the selected architecture
+if args.net == 'vit':
+    custom_config = {
+        "img_size": 224,
+        "patch_size": 16,
+        "in_chans": 3,
+        "n_classes": 200,
+        "embed_dim": 768,
+        "depth": 10,
+        "n_heads": 12,
+        "mlp_ratio": 4.,
+        "qkv_bias": True,
+    }
+    model = VisionTransformer(**custom_config).to(args.device)
+elif args.net == 'bvit':
+    custom_config = {
+        "img_size": 224,
+        "patch_size": 16,
+        "in_chans": 3,
+        "n_classes": 200,
+        "embed_dim": 768,
+        "depth": 10,
+        "n_heads": 12,
+        "mlp_ratio": 4.,
+        "qkv_bias": True,
+    }
+    model = BinarizeVisionTransformer(**custom_config).to(args.device)
+elif args.net == 'swin':
+    model = SwinTransformer(
+        input_image_channel=3,
+        patch_size=4,
+        model_dim_C=4,
+        window_size=4,
+        numhead=2,
+        merge_size=2,
+        num_classes=10,
+        embedding_mode='conv'
+    ).to(args.device)
+
+# Initialize meta parameters
+meta = {}
+if args.net in ['vit', 'bvit', 'swin']:
     for n, p in model.named_parameters():
-        index = int(n[9])
-        p.newname = 'l'+str(index)
-        if ('fc' in n) or ('cv' in n):
-            meta[p.newname] = args.meta[index-1] if len(args.meta)>1 else args.meta[0]
+        index = [768, 10]
+        p.newname = 'l' + str(index)
+        if 'fc' in n or 'cv' in n:
+            meta[p.newname] = args.meta[index - 1] if len(args.meta) > 1 else args.meta[0]
 
-#Model Details
-print("Model Parameters",sum(p.numel() for p in model.parameters()))
-print(model)
-data = run_training_loop(model, train_loader_list, test_loader_list, args, args.epochs_per_task, task_names)
+# Run the training loop
+data = run_training_loop(model, train_loader_list, test_loader_list, args, epochs, task_names)
+
 print(data)
