@@ -90,7 +90,7 @@ if args.net == 'vit':
         "in_chans": 3,
         "n_classes": 200,
         "embed_dim": 768,
-        "depth": 10,
+        "depth": 4,
         "n_heads": 12,
         "mlp_ratio": 4.,
         "qkv_bias": True,
@@ -103,27 +103,29 @@ elif args.net == 'bvit':
         "in_chans": 3,
         "n_classes": 200,
         "embed_dim": 768,
-        "depth": 10,
+        "depth": 4,
         "n_heads": 12,
         "mlp_ratio": 4.,
         "qkv_bias": True,
     }
     model = BinarizeVisionTransformer(**custom_config).to(args.device)
-elif args.net == 'swin':
-    model = SwinTransformer(
-        input_image_channel=3,
-        patch_size=4,
-        model_dim_C=4,
-        window_size=4,
-        numhead=2,
-        merge_size=2,
-        num_classes=10,
-        embedding_mode='conv'
-    ).to(args.device)
+elif args.net == 'hybrid':
+    custom_config = {
+        "img_size": 224,
+        "patch_size": 16,
+        "in_chans": 3,
+        "n_classes": 200,
+        "embed_dim": 768,
+        "depth": 4,
+        "n_heads": 12,
+        "mlp_ratio": 4.,
+        "qkv_bias": True,
+    }
+    model = HybridisionTransformer(**custom_config).to(args.device)
 
 # Initialize meta parameters
 meta = {}
-if args.net in ['vit', 'bvit', 'swin']:
+if args.net in ['vit', 'bvit', 'hybrid']:
     for n, p in model.named_parameters():
         index = [768, 10]
         p.newname = 'l' + str(index)
