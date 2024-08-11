@@ -296,6 +296,64 @@ class BinarizeMLP(nn.Module):
         x = self.drop(x)  # (n_samples, n_patches + 1, out_features)
 
         return x
+class BinarizeHybridMLP(nn.Module):
+    """Multilayer perceptron.
+
+	Parameters
+	----------
+	in_features : int
+    	Number of input features.
+
+	hidden_features : int
+    	Number of nodes in the hidden layer.
+
+	out_features : int
+    	Number of output features.
+
+	p : float
+    	Dropout probability.
+
+	Attributes
+	----------
+	fc : nn.Linear
+    	The First linear layer.
+
+	act : nn.GELU
+    	GELU activation function.
+
+	fc2 : nn.Linear
+    	The second linear layer.
+
+	drop : nn.Dropout
+    	Dropout layer.
+	"""
+    def __init__(self, in_features, hidden_features, out_features, p=0.):
+        super().__init__()
+        self.hbn1 = BinarizeLinear(in_features, hidden_features)
+        self.act = nn.GELU()
+        self.hbn2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(p)
+
+    def forward(self, x):
+        """Run forward pass.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Shape `(n_samples, n_patches + 1, in_features)`.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape `(n_samples, n_patches +1, out_features)`
+        """
+        x = self.hbn1(x) # (n_samples, n_patches + 1, hidden_features)
+        x = self.act(x)  # (n_samples, n_patches + 1, hidden_features)
+        x = self.drop(x)  # (n_samples, n_patches + 1, hidden_features)
+        x = self.hbn2(x)  # (n_samples, n_patches + 1, out_features)
+        x = self.drop(x)  # (n_samples, n_patches + 1, out_features)
+
+        return x
 
 class MLP(nn.Module):
     """Multilayer perceptron.
@@ -494,7 +552,73 @@ class BinarizeBlock(nn.Module):
         x = x + self.mlp(self.norm2(x))
 
         return x
+class BinarizeHybridBlock(nn.Module):
+    """Transformer block.
 
+	Parameters
+	----------
+	dim : int
+    	Embeddinig dimension.
+
+	n_heads : int
+    	Number of attention heads.
+
+	mlp_ratio : float
+    	Determines the hidden dimension size of the `MLP` module with respect
+    	to `dim`.
+
+	qkv_bias : bool
+    	If True then we include bias to the query, key and value projections.
+
+	p, attn_p : float
+    	Dropout probability.
+
+	Attributes
+	----------
+	norm1, norm2 : LayerNorm
+    	Layer normalization.
+
+	attn : Attention
+    	Attention module.
+
+	mlp : MLP
+    	MLP module.
+	"""
+    def __init__(self, dim, n_heads, mlp_ratio=4.0, qkv_bias=True, p=0., attn_p=0.):
+        super().__init__()
+        self.norm1 = BinarizedLayerNorm(dim, eps=1e-6)
+        self.attn = Attention(
+                dim,
+                n_heads=n_heads,
+                qkv_bias=qkv_bias,
+                attn_p=attn_p,
+                proj_p=p
+        )
+        self.norm2 = nn.LayerNorm(dim, eps=1e-6)
+        hidden_features = int(dim * mlp_ratio)
+        self.mlp = BinarizeHybridMLP(
+                in_features=dim,
+                hidden_features=hidden_features,
+                out_features=dim,
+        )
+
+    def forward(self, x):
+        """Run forward pass.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Shape `(n_samples, n_patches + 1, dim)`.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape `(n_samples, n_patches + 1, dim)`.
+        """
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+
+        return x
 class VisionTransformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, n_classes=200, embed_dim=768, depth=12, n_heads=12, mlp_ratio=4., qkv_bias=True, p=0., attn_p=0.):
         super().__init__()
@@ -579,6 +703,76 @@ class BinarizeVisionTransformer(nn.Module):
         layer_list = {}
         for i in range(depth):
             layer_list[f'block_{i+1}'] = BinarizeBlock(embed_dim, n_heads, mlp_ratio, qkv_bias, p, atten_p)
+        
+        layer_list['norm'] = BinarizedLayerNorm(embed_dim, eps=1e-6)
+        layer_list['head'] = BinarizeLinear(embed_dim, n_classes)
+        self.layers = nn.ModuleDict(layer_list)
+
+    def forward(self, x):
+        x = self.patch_embed(x)
+        cls_token = self.cls_token.expand(x.size(0), -1, -1)  # Match cls_token to batch size
+        x = torch.cat((cls_token, x), dim=1)  # Concatenate cls_token with patch embeddings
+        x = x + self.pos_embed  # Add positional embeddings
+        x = self.pos_drop(x)
+
+        for i in range(1, len(self.layers) - 2):  # Iterate through blocks
+            x = self.layers[f'block_{i}'](x)
+        
+        x = self.layers['norm'](x)
+        cls_token_final = x[:, 0]
+        x = self.layers['head'](cls_token_final)
+        return x
+    def save_bn_states(self):
+        bn_states = []
+        for name, layer in self.layers.items():
+            if 'block' in name:
+                bn = copy.deepcopy(layer.state_dict())
+                bn_states.append((name, bn))
+        return bn_states
+
+    def load_bn_states(self, bn_states):
+        for name, bn in bn_states:
+            if 'block' in name:
+                self.layers[name].load_state_dict(bn)
+
+
+class HybridisionTransformer(nn.Module):
+    """
+	Attributes
+	----------
+	patch_embed : PatchEmbed
+    	Instance of `PatchEmbed` layer.
+
+	cls_token : nn.Parameter
+    	Learnable parameter that will represent the first token in the sequence.
+    	It has `embed_dim` elements.
+
+	pos_emb : nn.Parameter
+    	Positional embedding of the cls token + all the patches.
+    	It has `(n_patches + 1) * embed_dim` elements.
+
+	pos_drop : nn.Dropout
+    	Dropout layer.
+
+	blocks : nn.ModuleList
+    	List of `Block` modules.
+
+	norm : nn.BinarizeLayerNorm
+    	Layer normalization.
+	"""
+
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, n_classes=200, embed_dim=768, depth=12, n_heads=12, mlp_ratio=4., qkv_bias=True, p=0, atten_p=0.):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, 1 + self.patch_embed.n_patches, embed_dim))
+        self.pos_drop = nn.Dropout(p=p)
+
+        layer_list = {}
+        for i in range(depth):
+            layer_list[f'block_{i+1}'] = BinarizeHybridBlock(embed_dim, n_heads, mlp_ratio, qkv_bias, p, atten_p)
         
         layer_list['norm'] = BinarizedLayerNorm(embed_dim, eps=1e-6)
         layer_list['head'] = nn.Linear(embed_dim, n_classes)
